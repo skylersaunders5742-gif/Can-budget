@@ -82,11 +82,25 @@ async function compressReceiptImage(file){
   const url=URL.createObjectURL(file);
   try{
     const img=await new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>resolve(im);im.onerror=()=>reject(new Error('Can Budget could not read that image. Try taking another photo.'));im.src=url});
-    const max=1600,scale=Math.min(1,max/Math.max(img.naturalWidth||img.width,img.naturalHeight||img.height));
+    // OCR needs small receipt characters. Preserve substantially more detail than the
+    // storage thumbnail/compressed copy.
+    const max=3200,scale=Math.min(1,max/Math.max(img.naturalWidth||img.width,img.naturalHeight||img.height));
     const w=Math.max(1,Math.round((img.naturalWidth||img.width)*scale)),h=Math.max(1,Math.round((img.naturalHeight||img.height)*scale));
     const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
-    const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0,w,h);
-    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.78));
+    const ctx=canvas.getContext('2d',{willReadFrequently:true});
+    ctx.drawImage(img,0,0,w,h);
+
+    // Light grayscale + contrast boost improves thermal receipt digits without
+    // changing the photo that gets stored in the receipt library.
+    const data=ctx.getImageData(0,0,w,h);
+    const px=data.data;
+    for(let i=0;i<px.length;i+=4){
+      const gray=Math.round(px[i]*0.299+px[i+1]*0.587+px[i+2]*0.114);
+      const c=Math.max(0,Math.min(255,(gray-128)*1.35+128));
+      px[i]=px[i+1]=px[i+2]=c;
+    }
+    ctx.putImageData(data,0,0);
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',0.94));
     if(!blob)throw new Error('Can Budget could not prepare that receipt photo.');
     return blob;
   }finally{URL.revokeObjectURL(url)}
@@ -200,6 +214,224 @@ function annual(){
  <div class="sectionhead"><h2>Long-term picture</h2><span class="muted">Recorded in Can Budget</span></div><div class="card"><div class="line"><span>All-time income</span><b class="positive">${money(state.income.reduce((s,x)=>s+Number(x.amount||0),0))}</b></div><div class="line"><span>All-time spending</span><b class="negative">${money(state.expenses.reduce((s,x)=>s+Number(x.amount||0),0))}</b></div><div class="line"><span>All-time net</span><b>${money(state.income.reduce((s,x)=>s+Number(x.amount||0),0)-state.expenses.reduce((s,x)=>s+Number(x.amount||0),0))}</b></div></div>`;
 }
 
+
+let receiptOCRWorker=null;
+
+function normalizeOCRText(text){
+  return String(text||'')
+    .replace(/\r/g,'')
+    .replace(/[|]/g,'I')
+    .replace(/[ \t]+/g,' ')
+    .trim();
+}
+function cleanMoneyCandidate(s){
+  if(!s)return null;
+  const cleaned=String(s).replace(/[^\d.,-]/g,'').replace(/,/g,'');
+  const n=Number(cleaned);
+  return Number.isFinite(n)&&n>=0?n:null;
+}
+function parseReceiptDate(text){
+  const lines=String(text||'').split('\n');
+  const fullYear=y=>{
+    y=Number(y);
+    if(y<100)return y<=69?2000+y:1900+y;
+    return y;
+  };
+  const valid=(y,m,d)=>y>=2000&&y<=2100&&m>=1&&m<=12&&d>=1&&d<=31;
+  const found=[];
+
+  const pushDate=(y,m,d,sourceLine)=>{
+    y=fullYear(y);m=Number(m);d=Number(d);
+    if(!valid(y,m,d))return;
+    found.push({
+      iso:`${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`,
+      line:String(sourceLine||'')
+    });
+  };
+
+  for(const line of lines){
+    // YYYY-MM-DD or YYYY/MM/DD
+    for(const m of line.matchAll(/\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b/g)){
+      pushDate(m[1],m[2],m[3],line);
+    }
+
+    // MM/DD/YY, MM-DD-YY, etc. North-American retail default.
+    for(const m of line.matchAll(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\b/g)){
+      const a=Number(m[1]),b=Number(m[2]);
+      let mo=a,d=b;
+      if(a>12){d=a;mo=b}
+      pushDate(m[3],mo,d,line);
+    }
+  }
+
+  if(!found.length)return '';
+
+  // Score by frequency first. Receipts often print the same transaction date
+  // more than once, which makes repeated agreement more trustworthy than one OCR hit.
+  const counts=new Map();
+  for(const item of found)counts.set(item.iso,(counts.get(item.iso)||0)+1);
+
+  let best=[...counts.entries()]
+    .sort((a,b)=>b[1]-a[1] || a[0].localeCompare(b[0]))[0]?.[0] || '';
+
+  // OCR often confuses 5/6 and 3/8. If two candidates are exactly one day apart,
+  // prefer the one that appears more often. If tied, prefer a candidate that appears
+  // on a line with a time, since transaction date/time lines are usually authoritative.
+  const entries=[...counts.entries()].sort((a,b)=>b[1]-a[1]);
+  if(entries.length>1){
+    const [first,second]=entries;
+    const d1=new Date(first[0]+'T12:00:00');
+    const d2=new Date(second[0]+'T12:00:00');
+    const diff=Math.abs((d1-d2)/86400000);
+    if(diff===1 && first[1]===second[1]){
+      const firstTimeHits=found.filter(x=>x.iso===first[0]&&/\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(x.line)).length;
+      const secondTimeHits=found.filter(x=>x.iso===second[0]&&/\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(x.line)).length;
+      if(secondTimeHits>firstTimeHits)best=second[0];
+    }
+  }
+
+  return best;
+}
+function parseReceiptTotal(text){
+  const lines=String(text||'').split('\n').map(x=>x.trim()).filter(Boolean);
+  const strongWords=/\b(grand\s+total|amount\s+due|balance\s+due|total\s+due|total)\b/i;
+  const rejectWords=/\b(sub\s*total|subtotal|tax|hst|gst|pst|change|cash|tender|tip|discount|saving|savings)\b/i;
+  let candidates=[];
+  lines.forEach((line,i)=>{
+    if(!strongWords.test(line)||rejectWords.test(line))return;
+    const amounts=[...line.matchAll(/(?:\$|CAD\s*)?(\d{1,6}[.,]\d{2})\b/gi)].map(m=>cleanMoneyCandidate(m[1])).filter(v=>v!==null);
+    amounts.forEach(v=>candidates.push({value:v,score:100-i}));
+  });
+  if(candidates.length)return candidates.sort((a,b)=>b.score-a.score)[0].value;
+
+  // Fallback: likely amount from lower half of receipt, avoiding common tax/subtotal lines.
+  lines.slice(Math.floor(lines.length*.45)).forEach((line,i)=>{
+    if(rejectWords.test(line))return;
+    const amounts=[...line.matchAll(/(?:\$|CAD\s*)?(\d{1,6}[.,]\d{2})\b/gi)].map(m=>cleanMoneyCandidate(m[1])).filter(v=>v!==null&&v<100000);
+    amounts.forEach(v=>candidates.push({value:v,score:i}));
+  });
+  if(!candidates.length)return null;
+  // Prefer later, reasonably large values but avoid blindly choosing the maximum.
+  candidates.sort((a,b)=>(b.score-a.score)||(b.value-a.value));
+  return candidates[0].value;
+}
+function normalizeMerchantOCR(s){
+  return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+}
+function editDistance(a,b){
+  a=normalizeMerchantOCR(a); b=normalizeMerchantOCR(b);
+  const row=Array.from({length:b.length+1},(_,i)=>i);
+  for(let i=1;i<=a.length;i++){
+    let prev=row[0]; row[0]=i;
+    for(let j=1;j<=b.length;j++){
+      const old=row[j];
+      row[j]=Math.min(row[j]+1,row[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));
+      prev=old;
+    }
+  }
+  return row[b.length];
+}
+function canonicalMerchant(raw,text){
+  const known=['Walmart','Costco','Loblaws','No Frills','Sobeys','Metro','Food Basics','FreshCo','Farm Boy','Shoppers Drug Mart','Rexall','Canadian Tire','Dollarama','Tim Hortons','Starbucks','Shell','Esso','Petro-Canada'];
+  const whole=normalizeMerchantOCR(text);
+  for(const name of known){
+    if(whole.includes(normalizeMerchantOCR(name))) return name;
+  }
+  let best=raw,score=Infinity;
+  for(const name of known){
+    const d=editDistance(raw,name)/Math.max(normalizeMerchantOCR(raw).length,normalizeMerchantOCR(name).length,1);
+    if(d<score){score=d;best=name;}
+  }
+  return score<=0.38?best:raw;
+}
+function parseReceiptMerchant(text){
+  const lines=String(text||'').split('\n').map(x=>x.trim()).filter(x=>x.length>=2);
+  const junk=/^(receipt|invoice|customer|merchant|store|thank\s*you|welcome|tel\b|phone\b|www\.|http|date\b|time\b|cashier\b|transaction\b|order\b|subtotal\b|total\b|tax\b|hst\b|gst\b|pst\b)/i;
+  const looksNumeric=/^[\d\s#*:+\-./]+$/;
+  const scored=lines.slice(0,14).map((line,i)=>{
+    let score=34-i*2;
+    if(junk.test(line))score-=55;
+    if(looksNumeric.test(line))score-=45;
+    if(/\d{3}[- )]\d{3}/.test(line))score-=30;
+    if(/[A-Za-z]{3}/.test(line))score+=12;
+    if(line.length>36)score-=12;
+    return {line,score};
+  }).sort((a,b)=>b.score-a.score);
+  const raw=scored[0]?.score>0?scored[0].line.replace(/[^\w&'(). -]/g,'').trim():'';
+  return canonicalMerchant(raw,text);
+}
+function suggestReceiptCategory(merchant,text){
+  const s=`${merchant} ${text}`.toLowerCase();
+  const rules=[
+    ['Groceries',/(walmart|costco|loblaws|nofrills|no frills|sobeys|metro|food basics|superstore|grocery|market|freshco|farm boy)/],
+    ['Restaurants',/(restaurant|cafe|coffee|tim hortons|starbucks|mcdonald|burger|pizza|subway|wendy|diner|grill)/],
+    ['Transportation',/(shell|esso|petro|canadian tire gas|fuel|gasoline|uber|lyft|transit|parking)/],
+    ['Healthcare',/(pharmacy|drug mart|shoppers|rexall|clinic|dental|medical)/],
+    ['Shopping',/(amazon|best buy|canadian tire|dollarama|winners|homesense|ikea|home depot|rona|staples)/],
+    ['Entertainment',/(cineplex|netflix|spotify|theatre|cinema|game|entertainment)/]
+  ];
+  return rules.find(([,rx])=>rx.test(s))?.[0]||'Other';
+}
+function fillReceiptField(form,name,value){
+  const el=form?.elements?.namedItem(name);
+  if(!el||value===null||value===undefined||value==='')return false;
+  el.value=String(value);
+  el.dispatchEvent(new Event('change',{bubbles:true}));
+  return true;
+}
+async function getReceiptOCRWorker(){
+  if(receiptOCRWorker)return receiptOCRWorker;
+  if(!window.Tesseract?.createWorker)throw new Error('The receipt reader could not load. Check your internet connection and try again.');
+  receiptOCRWorker=await Tesseract.createWorker('eng',1,{
+    logger:m=>{
+      const status=document.getElementById('receiptOCRStatus');
+      const bar=document.getElementById('receiptOCRProgress');
+      if(status&&m.status)status.textContent=m.status.replace(/_/g,' ');
+      if(bar&&Number.isFinite(m.progress))bar.style.width=`${Math.round(m.progress*100)}%`;
+    }
+  });
+  return receiptOCRWorker;
+}
+async function scanReceiptImage(file){
+  const form=document.getElementById('entryForm');
+  const statusBox=document.getElementById('receiptOCRBox');
+  const status=document.getElementById('receiptOCRStatus');
+  const raw=document.getElementById('receiptOCRRaw');
+  if(!form||!file)return;
+  statusBox?.classList.remove('hidden');
+  if(status)status.textContent='Preparing receipt…';
+  try{
+    const blob=await compressReceiptImage(file);
+    const worker=await getReceiptOCRWorker();
+    if(status)status.textContent='Reading receipt…';
+    const result=await worker.recognize(blob);
+    const text=normalizeOCRText(result?.data?.text);
+    if(!text)throw new Error('No readable text was found. Try retaking the photo in brighter light with the whole receipt visible.');
+    const merchant=parseReceiptMerchant(text);
+    const total=parseReceiptTotal(text);
+    const date=parseReceiptDate(text);
+    const category=suggestReceiptCategory(merchant,text);
+
+    fillReceiptField(form,'merchant',merchant);
+    if(total!==null)fillReceiptField(form,'amount',total.toFixed(2));
+    const dateField=form?.elements?.namedItem('date');
+    if(date) fillReceiptField(form,'date',date);
+    else if(dateField) dateField.value='';
+    fillReceiptField(form,'category',category);
+
+    const found=[];
+    if(merchant)found.push(`merchant: ${merchant}`);
+    if(total!==null)found.push(`total: ${money(total)}`);
+    if(date)found.push(`date: ${fmt(date)}`);
+    if(category)found.push(`category: ${category}`);
+    if(status)status.textContent=found.length?`Filled ${found.join(' · ')}. Date detection checks all date-like lines and prefers repeated agreement. Please check the details before saving.`:'Text was read, but the main receipt details were unclear. Please fill in the missing fields.';
+    if(raw){raw.textContent=text;raw.parentElement?.classList.remove('hidden')}
+  }catch(err){
+    console.error('Receipt OCR failed:',err);
+    if(status)status.textContent=err?.message||'Can Budget could not read this receipt. You can still enter the details manually.';
+  }
+}
+
 function receipts(){
  const all=[...(state.receipts||[])].sort((a,b)=>String(b.date).localeCompare(String(a.date)));
  const groups={};
@@ -281,16 +513,17 @@ function openAddMenu(){
 }
 
 function addReceipt(){openModal(formShell('Add receipt',`
- <div class="notice"><strong>Receipt photo</strong><br>On iPhone, tap below to take a photo or choose one from your photo library. The image is compressed before it is stored.</div>
- <div class="field"><label>Receipt image</label><label class="receipt-photo-picker" for="receiptImage"><span class="receipt-camera">📷</span><span><strong>Take / choose photo</strong><small>JPG, PNG, HEIC or another image format supported by your phone</small></span></label><input id="receiptImage" class="receipt-file-input" name="receiptImage" type="file" accept="image/*" capture="environment" required></div>
+ <div class="notice"><strong>Automatic receipt reader</strong><br>Take a clear photo of the full receipt. Can Budget will try to fill in the merchant, total, date, and category for you. Always check the detected details before saving.</div>
+ <div class="field"><label>Receipt image</label><label class="receipt-photo-picker" for="receiptImage"><span class="receipt-camera">📷</span><span><strong>Take / choose photo</strong><small>Keep the receipt flat, bright, and fully inside the photo</small></span></label><input id="receiptImage" class="receipt-file-input" name="receiptImage" type="file" accept="image/*" capture="environment" required></div>
  <div id="receiptPreviewBox" class="receipt-preview hidden"><img id="receiptPreview" alt="Selected receipt preview"><div id="receiptFileName" class="muted"></div></div>
- <div class="field"><label>Merchant</label><input name="merchant" placeholder="e.g. Costco" required></div>
- <div class="field"><label>Amount (CAD)</label><input name="amount" type="number" min="0" step=".01" required></div>
- <div class="field"><label>Category</label><select name="category">${['Groceries','Restaurants','Transportation','Shopping','Entertainment','Bills','Healthcare','Other'].map(x=>`<option>${x}</option>`).join('')}</select></div>
- <div class="field"><label>Date</label><input name="date" type="date" value="${today()}" required></div>
+ <div id="receiptOCRBox" class="receipt-ocr-box hidden"><div class="receipt-ocr-title"><span>✨ Reading receipt</span><span id="receiptOCRStatus">Waiting…</span></div><div class="receipt-ocr-track"><div id="receiptOCRProgress"></div></div></div>
+ <div class="field"><label>Merchant <span class="autofill-label">Auto-fill</span></label><input name="merchant" placeholder="Scanning will try to fill this" required></div>
+ <div class="field"><label>Total amount (CAD) <span class="autofill-label">Auto-fill</span></label><input name="amount" type="number" min="0" step=".01" placeholder="0.00" required></div>
+ <div class="field"><label>Category <span class="autofill-label">Suggested</span></label><select name="category">${['Groceries','Restaurants','Transportation','Shopping','Entertainment','Bills','Healthcare','Other'].map(x=>`<option>${x}</option>`).join('')}</select></div>
+ <div class="field"><label>Date <span class="autofill-label">Auto-fill</span></label><input name="date" type="date" value="" required></div>
  <div class="field"><label>Note</label><input name="note" placeholder="Optional"></div>
- <div class="notice">For this test build, saving a receipt does <strong>not</strong> automatically create an expense, so you won't accidentally double-count spending.</div>`,'Save receipt','receipt'))}
-
+ <details class="receipt-raw-wrap hidden"><summary>Detected receipt text</summary><pre id="receiptOCRRaw"></pre></details>
+ <div class="notice">Can Budget's receipt reading is a convenience feature and can make mistakes. Confirm the merchant, total, and date before saving. Saving a receipt still does not create an expense automatically in this test build.</div>`,'Save receipt','receipt'))}
 async function viewReceipt(id){
  const r=state.receipts.find(x=>String(x.id)===String(id));if(!r)return;
  openModal(`<div class="modalhead"><h2>${esc(r.merchant)}</h2><button class="close" data-close>×</button></div>
@@ -353,6 +586,7 @@ document.addEventListener('change',e=>{
    if(!file||!box||!img)return;
    const url=URL.createObjectURL(file);img.src=url;name.textContent=`${file.name || 'Receipt photo'} · ${Math.max(1,Math.round(file.size/1024))} KB`;box.classList.remove('hidden');
    img.addEventListener('load',()=>URL.revokeObjectURL(url),{once:true});
+   scanReceiptImage(file);
  }
 });
 

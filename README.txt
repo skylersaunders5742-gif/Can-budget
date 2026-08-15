@@ -1,16 +1,15 @@
-Can Budget V1.6.3 — Add Sheet + Save Visibility
+Can Budget V1.7.4 — High Accuracy Receipt OCR
+
+The July 15/16 error was traced to OCR image preparation, not the date parser:
+the previous build reduced a tall receipt photo to 1600px before OCR, making
+small printed digits easier to confuse.
 
 Changes:
-- Uses the approved card-style Add menu design.
-- Keeps the centered curved bottom navigation.
-- Add sheet now sits fully above the bottom navigation.
-- Forms can scroll independently.
-- Save buttons remain visible/reachable using a sticky action button.
-- Receipt photo features remain intact.
-- Existing friendly errors remain intact.
+- OCR working image increased from max 1600px to max 3200px.
+- OCR image quality increased.
+- Light grayscale/contrast preprocessing added for thermal receipt text.
+- Date consensus from V1.7.3 retained.
+- Walmart merchant correction, total detection, category suggestion, receipt
+  storage, navigation, and Add sheet retained.
 
-Quick PC check:
-1. Extract ZIP and open index.html.
-2. Tap + and confirm the new Add menu.
-3. Open Add Bill, scroll through the form, and confirm Save Bill remains reachable.
-4. Test Add Receipt and photo preview.
+The original receipt photo storage path is unchanged.

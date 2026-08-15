@@ -407,3 +407,75 @@ h2{font-size:18px;margin:22px 0 10px}h3{margin:0 0 8px}
   .add-choice-copy strong{font-size:15px}
   .add-choice-copy small{font-size:11px}
 }
+
+
+/* V1.7 automatic receipt reading */
+.autofill-label{
+  display:inline-block;
+  margin-left:5px;
+  padding:2px 6px;
+  border-radius:999px;
+  background:#e8f5ff;
+  color:#0b66b2;
+  font-size:9px;
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:.04em;
+}
+.receipt-ocr-box{
+  margin:12px 0 16px;
+  padding:12px 13px;
+  border:1px solid #cae2f2;
+  border-radius:14px;
+  background:#f5fbff;
+}
+.receipt-ocr-title{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  color:#315f7f;
+  font-size:11px;
+  font-weight:700;
+}
+.receipt-ocr-title span:last-child{
+  text-align:right;
+  font-weight:600;
+  color:#64829a;
+}
+.receipt-ocr-track{
+  height:6px;
+  margin-top:9px;
+  overflow:hidden;
+  border-radius:999px;
+  background:#dcecf6;
+}
+.receipt-ocr-track>div{
+  height:100%;
+  width:0;
+  border-radius:999px;
+  background:#0b66b2;
+  transition:width .15s linear;
+}
+.receipt-raw-wrap{
+  margin:12px 0;
+  border:1px solid #dce7ef;
+  border-radius:12px;
+  background:#f9fcfe;
+  padding:10px 12px;
+}
+.receipt-raw-wrap summary{
+  cursor:pointer;
+  color:#496c87;
+  font-size:12px;
+  font-weight:750;
+}
+.receipt-raw-wrap pre{
+  margin:9px 0 0;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  color:#61788d;
+  font-size:10px;
+  line-height:1.4;
+  max-height:180px;
+  overflow:auto;
+}
