@@ -1,15 +1,17 @@
-Can Budget V1.7.4 — High Accuracy Receipt OCR
+Can Budget V1.7.7 — Final Amount Paid Fix
 
-The July 15/16 error was traced to OCR image preparation, not the date parser:
-the previous build reduced a tall receipt photo to 1600px before OCR, making
-small printed digits easier to confuse.
+Fixes receipts that contain several "You Paid" lines.
 
-Changes:
-- OCR working image increased from max 1600px to max 3200px.
-- OCR image quality increased.
-- Light grayscale/contrast preprocessing added for thermal receipt text.
-- Date consensus from V1.7.3 retained.
-- Walmart merchant correction, total detection, category suggestion, receipt
-  storage, navigation, and Add sheet retained.
+Example Lawtons receipt:
+- Item 1 You Paid: $12.53
+- Item 2 You Paid: $12.42
+- Final summary YOU PAID: $24.95
 
-The original receipt photo storage path is unchanged.
+Can Budget now collects all explicit paid amounts and prefers the final summary
+amount near the subtotal/total section, rather than taking the first item-level copay.
+
+Expected Lawtons result:
+Lawtons Drugs · $24.95 · Healthcare · 2026-07-17
+
+All V1.7.6 merchant recognition, high-resolution OCR, date logic, category
+suggestions, receipt photos, navigation, and learned merchant corrections remain.

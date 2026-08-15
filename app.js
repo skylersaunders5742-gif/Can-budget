@@ -294,35 +294,93 @@ function parseReceiptDate(text){
 }
 function parseReceiptTotal(text){
   const lines=String(text||'').split('\n').map(x=>x.trim()).filter(Boolean);
+
+  const amountsIn=line=>[...String(line||'').matchAll(/(?:\$|CAD\s*)?(\d{1,6}[.,]\d{2})\b/gi)]
+    .map(m=>cleanMoneyCandidate(m[1]))
+    .filter(v=>v!==null&&v>=0&&v<100000);
+
+  // Highest priority: explicit "you paid" / out-of-pocket amounts.
+  // Receipts can contain per-item "You Paid" values AND one final summary
+  // "YOU PAID" amount. We collect them all and prefer the final summary.
+  const paidLabels=[
+    /\byou\s+paid\b/i,
+    /\bamount\s+paid\b/i,
+    /\bcustomer\s+paid\b/i,
+    /\bpaid\s+by\s+customer\b/i,
+    /\bout\s+of\s+pocket\b/i,
+    /\bpatient\s+(?:paid|pay)\b/i,
+    /\bmember\s+(?:paid|pay)\b/i
+  ];
+
+  const paidCandidates=[];
+  for(let i=0;i<lines.length;i++){
+    const line=lines[i];
+    if(!paidLabels.some(rx=>rx.test(line)))continue;
+
+    let vals=amountsIn(line);
+    if(!vals.length && lines[i+1])vals=amountsIn(lines[i+1]);
+
+    for(const value of vals){
+      let score=100;
+
+      // Final summary lines are commonly printed as uppercase "YOU PAID".
+      if(/\bYOU\s+PAID\b/.test(line))score+=35;
+
+      // Strongly prefer a paid amount that appears just after the receipt's
+      // subtotal/total section rather than a per-item copay line.
+      const nearby=lines.slice(Math.max(0,i-5),i).join(' ');
+      if(/\b(sub\s*total|subtotal|total|total\s+tax|tax)\b/i.test(nearby))score+=45;
+
+      // Later explicit paid lines are more likely to be the final summary.
+      score+=i*0.5;
+
+      paidCandidates.push({value,score,index:i,line});
+    }
+  }
+
+  if(paidCandidates.length){
+    paidCandidates.sort((a,b)=>b.score-a.score || b.value-a.value || b.index-a.index);
+    return paidCandidates[0].value;
+  }
+
+  // Standard retail receipts: TOTAL / GRAND TOTAL / AMOUNT DUE.
   const strongWords=/\b(grand\s+total|amount\s+due|balance\s+due|total\s+due|total)\b/i;
-  const rejectWords=/\b(sub\s*total|subtotal|tax|hst|gst|pst|change|cash|tender|tip|discount|saving|savings)\b/i;
-  let candidates=[];
+  const rejectWords=/\b(sub\s*total|subtotal|tax|hst|gst|pst|change|tip|discount|saving|savings|third\s*party|insurance)\b/i;
+  const totalCandidates=[];
   lines.forEach((line,i)=>{
     if(!strongWords.test(line)||rejectWords.test(line))return;
-    const amounts=[...line.matchAll(/(?:\$|CAD\s*)?(\d{1,6}[.,]\d{2})\b/gi)].map(m=>cleanMoneyCandidate(m[1])).filter(v=>v!==null);
-    amounts.forEach(v=>candidates.push({value:v,score:100-i}));
+    amountsIn(line).forEach(v=>totalCandidates.push({value:v,score:100-i}));
   });
-  if(candidates.length)return candidates.sort((a,b)=>b.score-a.score)[0].value;
+  if(totalCandidates.length)return totalCandidates.sort((a,b)=>b.score-a.score)[0].value;
 
-  // Fallback: likely amount from lower half of receipt, avoiding common tax/subtotal lines.
+  // Next best: payment/tender amount, excluding third-party or insurer payments.
+  const paymentCandidates=[];
+  lines.forEach((line,i)=>{
+    if(/\b(third\s*party|insurance|benefit|coverage)\b/i.test(line))return;
+    if(/\b(debit|credit|visa|mastercard|amex|interac|purchase|tender)\b/i.test(line)){
+      amountsIn(line).forEach(v=>paymentCandidates.push({value:v,score:80+i}));
+    }
+  });
+  if(paymentCandidates.length)return paymentCandidates.sort((a,b)=>b.score-a.score)[0].value;
+
+  // Last-resort fallback.
+  const fallback=[];
   lines.slice(Math.floor(lines.length*.45)).forEach((line,i)=>{
     if(rejectWords.test(line))return;
-    const amounts=[...line.matchAll(/(?:\$|CAD\s*)?(\d{1,6}[.,]\d{2})\b/gi)].map(m=>cleanMoneyCandidate(m[1])).filter(v=>v!==null&&v<100000);
-    amounts.forEach(v=>candidates.push({value:v,score:i}));
+    amountsIn(line).forEach(v=>fallback.push({value:v,score:i}));
   });
-  if(!candidates.length)return null;
-  // Prefer later, reasonably large values but avoid blindly choosing the maximum.
-  candidates.sort((a,b)=>(b.score-a.score)||(b.value-a.value));
-  return candidates[0].value;
+  if(!fallback.length)return null;
+  fallback.sort((a,b)=>(b.score-a.score)||(b.value-a.value));
+  return fallback[0].value;
 }
 function normalizeMerchantOCR(s){
-  return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  return String(s||'').toLowerCase().replace(/0/g,'o').replace(/1/g,'l').replace(/[^a-z0-9]/g,'');
 }
 function editDistance(a,b){
-  a=normalizeMerchantOCR(a); b=normalizeMerchantOCR(b);
+  a=normalizeMerchantOCR(a);b=normalizeMerchantOCR(b);
   const row=Array.from({length:b.length+1},(_,i)=>i);
   for(let i=1;i<=a.length;i++){
-    let prev=row[0]; row[0]=i;
+    let prev=row[0];row[0]=i;
     for(let j=1;j<=b.length;j++){
       const old=row[j];
       row[j]=Math.min(row[j]+1,row[j-1]+1,prev+(a[i-1]===b[j-1]?0:1));
@@ -331,33 +389,55 @@ function editDistance(a,b){
   }
   return row[b.length];
 }
+function merchantAliases(){
+  try{return JSON.parse(localStorage.getItem('can-budget-merchant-aliases')||'{}')}catch(e){return {}}
+}
+function saveMerchantAlias(raw,canonical){
+  const key=normalizeMerchantOCR(raw),value=String(canonical||'').trim();
+  if(!key||!value)return;
+  const aliases=merchantAliases();aliases[key]=value;
+  localStorage.setItem('can-budget-merchant-aliases',JSON.stringify(aliases));
+}
+function knownMerchants(){
+  return ['Walmart','Costco','Loblaws','No Frills','Sobeys','Metro','Food Basics','FreshCo','Farm Boy','Lawtons Drugs','Shoppers Drug Mart','Rexall','Canadian Tire','Dollarama','Amazon','Best Buy','Tim Hortons','Starbucks','McDonald\'s','Shell','Esso','Petro-Canada','Home Depot','RONA'];
+}
 function canonicalMerchant(raw,text){
-  const known=['Walmart','Costco','Loblaws','No Frills','Sobeys','Metro','Food Basics','FreshCo','Farm Boy','Shoppers Drug Mart','Rexall','Canadian Tire','Dollarama','Tim Hortons','Starbucks','Shell','Esso','Petro-Canada'];
-  const whole=normalizeMerchantOCR(text);
-  for(const name of known){
-    if(whole.includes(normalizeMerchantOCR(name))) return name;
+  const normalizedRaw=normalizeMerchantOCR(raw),aliases=merchantAliases(),whole=normalizeMerchantOCR(text);
+  if(aliases[normalizedRaw])return aliases[normalizedRaw];
+  for(const name of knownMerchants()){
+    if(whole.includes(normalizeMerchantOCR(name)))return name;
   }
-  let best=raw,score=Infinity;
-  for(const name of known){
-    const d=editDistance(raw,name)/Math.max(normalizeMerchantOCR(raw).length,normalizeMerchantOCR(name).length,1);
-    if(d<score){score=d;best=name;}
+  let best=raw,bestScore=Infinity;
+  for(const name of knownMerchants()){
+    const target=normalizeMerchantOCR(name);
+    const ratio=editDistance(normalizedRaw,target)/Math.max(normalizedRaw.length,target.length,1);
+    if(ratio<bestScore){bestScore=ratio;best=name}
   }
-  return score<=0.38?best:raw;
+  return bestScore<=0.42?best:raw;
 }
 function parseReceiptMerchant(text){
   const lines=String(text||'').split('\n').map(x=>x.trim()).filter(x=>x.length>=2);
-  const junk=/^(receipt|invoice|customer|merchant|store|thank\s*you|welcome|tel\b|phone\b|www\.|http|date\b|time\b|cashier\b|transaction\b|order\b|subtotal\b|total\b|tax\b|hst\b|gst\b|pst\b)/i;
-  const looksNumeric=/^[\d\s#*:+\-./]+$/;
-  const scored=lines.slice(0,14).map((line,i)=>{
-    let score=34-i*2;
-    if(junk.test(line))score-=55;
-    if(looksNumeric.test(line))score-=45;
-    if(/\d{3}[- )]\d{3}/.test(line))score-=30;
-    if(/[A-Za-z]{3}/.test(line))score+=12;
-    if(line.length>36)score-=12;
-    return {line,score};
-  }).sort((a,b)=>b.score-a.score);
-  const raw=scored[0]?.score>0?scored[0].line.replace(/[^\w&'(). -]/g,'').trim():'';
+  const junk=/^(receipt|invoice|customer|merchant|store|thank\s*you|welcome|tel\b|phone\b|www\.|http|date\b|time\b|cashier\b|transaction\b|order\b|subtotal\b|total\b|tax\b|hst\b|gst\b|pst\b|served\b|pharmacy\b)/i;
+  const numeric=/^[\d\s#*:+\-./]+$/;
+  const candidates=[];
+  lines.slice(0,18).forEach((line,i)=>{
+    if(junk.test(line)||numeric.test(line)||!/[A-Za-z]{3}/.test(line))return;
+    let score=42-i*2;
+    if(line.length>40)score-=12;
+    candidates.push({line,score,norm:normalizeMerchantOCR(line)});
+  });
+  for(const c of candidates){
+    for(const d of candidates){
+      if(c===d||!c.norm||!d.norm)continue;
+      if(c.norm.includes(d.norm)||d.norm.includes(c.norm))c.score+=12;
+      else{
+        const ratio=editDistance(c.norm,d.norm)/Math.max(c.norm.length,d.norm.length,1);
+        if(ratio<=0.35)c.score+=7;
+      }
+    }
+  }
+  candidates.sort((a,b)=>b.score-a.score);
+  const raw=candidates[0]?.line.replace(/[^\w&'(). -]/g,'').trim()||'';
   return canonicalMerchant(raw,text);
 }
 function suggestReceiptCategory(merchant,text){
@@ -412,7 +492,7 @@ async function scanReceiptImage(file){
     const date=parseReceiptDate(text);
     const category=suggestReceiptCategory(merchant,text);
 
-    fillReceiptField(form,'merchant',merchant);
+    fillReceiptField(form,'merchant',merchant);if(form)form.dataset.ocrMerchant=merchant||'';
     if(total!==null)fillReceiptField(form,'amount',total.toFixed(2));
     const dateField=form?.elements?.namedItem('date');
     if(date) fillReceiptField(form,'date',date);
@@ -421,7 +501,7 @@ async function scanReceiptImage(file){
 
     const found=[];
     if(merchant)found.push(`merchant: ${merchant}`);
-    if(total!==null)found.push(`total: ${money(total)}`);
+    if(total!==null)found.push(`paid: ${money(total)}`);
     if(date)found.push(`date: ${fmt(date)}`);
     if(category)found.push(`category: ${category}`);
     if(status)status.textContent=found.length?`Filled ${found.join(' · ')}. Date detection checks all date-like lines and prefers repeated agreement. Please check the details before saving.`:'Text was read, but the main receipt details were unclear. Please fill in the missing fields.';
@@ -518,7 +598,7 @@ function addReceipt(){openModal(formShell('Add receipt',`
  <div id="receiptPreviewBox" class="receipt-preview hidden"><img id="receiptPreview" alt="Selected receipt preview"><div id="receiptFileName" class="muted"></div></div>
  <div id="receiptOCRBox" class="receipt-ocr-box hidden"><div class="receipt-ocr-title"><span>✨ Reading receipt</span><span id="receiptOCRStatus">Waiting…</span></div><div class="receipt-ocr-track"><div id="receiptOCRProgress"></div></div></div>
  <div class="field"><label>Merchant <span class="autofill-label">Auto-fill</span></label><input name="merchant" placeholder="Scanning will try to fill this" required></div>
- <div class="field"><label>Total amount (CAD) <span class="autofill-label">Auto-fill</span></label><input name="amount" type="number" min="0" step=".01" placeholder="0.00" required></div>
+ <div class="field"><label>Amount paid (CAD) <span class="autofill-label">Auto-fill</span></label><input name="amount" type="number" min="0" step=".01" placeholder="0.00" required></div>
  <div class="field"><label>Category <span class="autofill-label">Suggested</span></label><select name="category">${['Groceries','Restaurants','Transportation','Shopping','Entertainment','Bills','Healthcare','Other'].map(x=>`<option>${x}</option>`).join('')}</select></div>
  <div class="field"><label>Date <span class="autofill-label">Auto-fill</span></label><input name="date" type="date" value="" required></div>
  <div class="field"><label>Note</label><input name="note" placeholder="Optional"></div>
@@ -620,6 +700,7 @@ document.addEventListener('submit',async e=>{
    const file=f.querySelector('#receiptImage')?.files?.[0];if(!file)throw new Error('Please take a photo or choose a receipt image before saving.');
    const id=uid(),imageId=`receipt-${id}`,blob=await compressReceiptImage(file);
    try{await saveReceiptImage(imageId,blob)}catch(mediaErr){throw new Error('Can Budget could not save the receipt photo on this device. '+(mediaErr?.message||''))}
+   if(f.dataset.ocrMerchant&&normalizeMerchantOCR(f.dataset.ocrMerchant)!==normalizeMerchantOCR(d.merchant))saveMerchantAlias(f.dataset.ocrMerchant,d.merchant);
    state.receipts.push({id,merchant:d.merchant,amount,date:d.date,category:d.category,note:d.note||'',imageId,createdAt:Date.now()});current='receipts';
   }
   if(kind==='reconcile'){ const id=Number(f.dataset.id),a=accountById(id),actual=Number(d.actual);if(!a||Number.isNaN(actual))throw new Error('Invalid bank balance');const adjustment=actual-Number(a.balance);if(Math.abs(adjustment)>0.004){adjustAccount(id,adjustment);state.reconciliations.push({id:uid(),accountId:id,adjustment,date:d.date,actualBalance:actual})}a.lastReconciled=d.date;
