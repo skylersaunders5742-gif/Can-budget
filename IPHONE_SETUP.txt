@@ -1,0 +1,26 @@
+CAN BUDGET — IPHONE SETUP
+
+This package is iPhone-ready as a PWA (Progressive Web App). It is not an App Store .ipa; a true native iOS build requires macOS/Xcode.
+
+ON YOUR WINDOWS PC:
+1. Open Command Prompt in this folder.
+2. Run:
+   python -m http.server 8012 --bind 0.0.0.0
+3. Find your PC's local IPv4 address:
+   ipconfig
+   Look for IPv4 Address under your Wi-Fi/Ethernet adapter.
+4. Make sure the iPhone and PC are on the same Wi-Fi.
+5. On iPhone Safari, visit:
+   http://YOUR-PC-IP:8012
+   Example: http://192.168.1.25:8012
+6. Tap Share.
+7. Tap "Add to Home Screen".
+8. Name it "Can Budget" and tap Add.
+
+IMPORTANT:
+- Your Can Budget data is stored in the browser on the device. The iPhone and PC have separate local data.
+- Do not clear Safari website data for Can Budget unless you intend to erase its local data.
+- The service worker/offline mode requires HTTPS on iPhone. The app is still usable from the PC over your local network without HTTPS.
+- This version does not connect to a bank yet.
+
+If Windows Firewall asks whether Python can communicate on the network, allow it on Private networks.

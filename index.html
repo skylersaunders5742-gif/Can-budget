@@ -6,6 +6,14 @@
 <title>Can Budget</title>
 <link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="styles.css">
+
+<meta name="theme-color" content="#0e62b1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Can Budget">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
+
 </head>
 <body>
 <div id="app">
@@ -17,11 +25,17 @@
   <main id="screen"></main>
 
   <nav class="bottom">
-    <button data-nav="home">⌂<small>Home</small></button>
-    <button data-nav="budget">▥<small>Budget</small></button>
-    <button class="plus" id="addBtn">+</button>
-    <button data-nav="activity">↕<small>Activity</small></button>
-    <button data-nav="accounts">◉<small>Accounts</small></button>
+    <div class="nav-side nav-left">
+      <button data-nav="home"><span class="nav-icon">⌂</span><small>Home</small></button>
+      <button data-nav="budget"><span class="nav-icon">▥</span><small>Budget</small></button>
+      <button data-nav="annual"><span class="nav-icon">▤</span><small>Annual</small></button>
+    </div>
+    <button class="plus" id="addBtn" aria-label="Add">+</button>
+    <div class="nav-side nav-right">
+      <button data-nav="receipts"><span class="nav-icon">▧</span><small>Receipts</small></button>
+      <button data-nav="activity"><span class="nav-icon">↕</span><small>Activity</small></button>
+      <button data-nav="accounts"><span class="nav-icon">◉</span><small>Accounts</small></button>
+    </div>
   </nav>
 </div>
 
